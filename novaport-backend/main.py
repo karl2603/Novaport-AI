@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
@@ -48,16 +48,26 @@ class ExtractionResponse(BaseModel):
     missing_fields: List[str]
 
 # ==========================================
-# SCHEMAS FOR PAGE 3: HS CODE VALIDATION
+# SCHEMAS FOR PAGE 3: HS CODE GENERATOR (TEXT)
 # ==========================================
-class HSCodeResponse(BaseModel):
-    product_description: str
-    declared_code: str
-    is_match: bool
-    confidence_level: str 
-    suggested_correct_code: str
-    alternatives: List[str]
-    reasoning: str
+class HSCodeRequest(BaseModel):
+    description: str
+
+class AlternativeHSCode(BaseModel):
+    code: str
+    description: str
+    confidence_percentage: int
+
+class HSCodeGeneratorResponse(BaseModel):
+    primary_hs_code: str
+    confidence_percentage: int
+    confidence_label: str # "Very High", "High", "Medium", "Low"
+    explanation: str
+    official_description: str
+    alternatives: List[AlternativeHSCode] # Must be exactly 3
+    special_notes: str
+    duty_rate: str
+    required_certificates: List[str]
 
 # ==========================================
 # SCHEMAS FOR PAGE 2: COMPLIANCE CHECKER
@@ -138,53 +148,50 @@ async def process_with_gemini(file: UploadFile, prompt: str, schema):
 
 @app.post("/api/extract")
 async def extract_document(file: UploadFile = File(...)):
-    prompt = """You are an elite customs AI. Your task is to extract EVERY piece of information from this trade document with perfect accuracy.
-
-    CRITICAL RULES:
-    1. Extract ALL line items separately — if the invoice has 10 products, return 10 objects in line_items.
-    2. For each line item, find or infer the most likely HS code based on the product description.
-    3. Never combine multiple products into one string — each product is its own line item.
-    4. If a field is genuinely missing from the document, add its exact name to the missing_fields list.
-    5. For weight: if individual weights are listed per item, extract them. Sum them for total_weight_kg if a stated total is missing.
-    6. For quantities: extract exactly as written (e.g. "500 PCS", "300 MTR").
-    7. For HS codes: use 8-digit Indian export HS codes where possible, 6-digit minimum.
-    8. Incoterms: FOB, CIF, CFR, EXW, DAP — extract exactly as stated.
-    9. Shipping method: "Air", "Sea", "Rail", or "Road". Infer from Carrier/AWB/BL if needed.
-    10. If invoice number or date not found, set as "Not Specified".
-
-    PRODUCT-SPECIFIC HS CODE GUIDANCE:
-    - Cotton woven shirts → 62052000
-    - Cotton knitted shirts/t-shirts → 61091000  
-    - Cotton fabric rolls → 52081190
-    - Polyester blend garments → 62059090
-    - Denim jeans → 62034200
-    - Cotton bedsheets → 63031990
-    - Cotton towels → 63021000
-    - Textile waste/scrap → 63101000
-    - Women's blouses woven → 62061000
-
-    Extract everything. Miss nothing. Be precise."""
+    prompt = """You are an elite customs AI. Extract EVERY piece of information from this trade document perfectly.
+    Extract all line items separately. Missing fields go to missing_fields. Output strictly matching the schema."""
     return await process_with_gemini(file, prompt, ExtractionResponse)
 
 @app.post("/api/hscode")
-async def validate_hscode(file: UploadFile = File(...)):
-    prompt = """You are an AI Customs Broker. Find the primary product description and its declared HS code on this document. 
-    Analyze if they logically match. Give a confidence level. If wrong, provide the correct 6-digit HS code, alternatives, and explain the mismatch."""
-    return await process_with_gemini(file, prompt, HSCodeResponse)
+async def generate_hscode(request: HSCodeRequest):
+    try:
+        prompt = f"""
+        You are an elite customs classification AI. The user has provided the following product description:
+        "{request.description}"
+
+        CLASSIFICATION RULES YOU MUST FOLLOW:
+        1. Use 8-digit HS codes in Indian format (first 6 international, last 2 India-specific).
+        2. Read carefully — material composition matters immensely.
+        3. Consider primary function and material. Apply GRI if multiple headings apply.
+        4. Confidence Rules:
+           - 90-100% = clear, obvious code
+           - 70-89% = good description, minor ambiguity
+           - 50-69% = could reasonably fall under 2-3 headings
+           - Below 50% = too vague, note this in special_notes
+        5. ALWAYS provide EXACTLY 3 alternatives.
+        6. For duty_rate, provide standard Indian export duty or "Refer to Customs Tariff".
+        7. For required_certificates, list typical Indian export certs (e.g., APEDA, BIS, Phytosanitary).
+
+        Return the data strictly matching the requested JSON schema.
+        """
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=HSCodeGeneratorResponse,
+            ),
+        )
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Gemini Error: {e}")
+        raise HTTPException(status_code=500, detail="AI Text processing failed.")
 
 @app.post("/api/compliance")
 async def check_compliance(file: UploadFile = File(...)):
     prompt = """
     You are a customs compliance AI system. Analyze this commercial invoice and detect ALL errors and compliance risks.
-    STEP 1: EXTRACT HS Codes, Descriptions, Origins, Destinations, Weights, Values, Method.
-    STEP 2: VALIDATE:
-    1. HS CODE: Present, 6-8 digits, matches product.
-    2. DESCRIPTIONS: Specific, flag vague terms.
-    3. MISSING FIELDS: HS code, weight, origin, values.
-    4. CONSISTENCY: Math totals match line items.
-    5. TRADE RULES: India -> UAE implicitly needs Certificate of Origin.
-    6. RISK ANALYSIS: Suspicious pricing/mismatches.
-    STEP 3: OUTPUT GREEN (No issues), YELLOW (Minor/Moderate), RED (Critical). Provide strict fixes.
+    Determine STATUS: GREEN, YELLOW, or RED based on strict trade regulations.
     """
     result = await process_with_gemini(file, prompt, ComplianceResponse)
     carbon_data = calculate_carbon_footprint(
