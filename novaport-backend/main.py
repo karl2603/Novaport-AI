@@ -1,15 +1,13 @@
-import fitz  # PyMuPDF
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
+import tempfile
 from google import genai
 from pydantic import BaseModel
 
-# Initialize FastAPI
 app = FastAPI()
 
-# Enable CORS for the React frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -19,24 +17,20 @@ app.add_middleware(
 )
 
 # --- WARNING: PASTE YOUR ACTUAL API KEY HERE ---
-# It should look something like "AIzaSy..."
-client = genai.Client(api_key="AIzaSyBjcRCX7_q5Hvpn6FN5GHdvGSf1uGpy88o")
+client = genai.Client(api_key="AIzaSyDx-J0k2X5rZvFRmQjzkLOxof_lq6X636c")
 
-# Define the exact JSON structure we want back from the AI
+# Upgraded Schema to match the Elite Customs Officer output
 class ComplianceIssue(BaseModel):
+    type: str
     severity: str
-    issue: str
-    fix_instruction: str
+    description: str
+    fix: str
 
 class ExtractedData(BaseModel):
-    shipper: str
-    consignee: str
     hs_code: str
-    product_description: str
+    destination_country: str
     weight_kg: float
     shipping_method: str
-    origin_country: str
-    destination_country: str
 
 class AnalysisResult(BaseModel):
     extracted_data: ExtractedData
@@ -44,9 +38,8 @@ class AnalysisResult(BaseModel):
     risk_score: str
 
 def calculate_carbon_footprint(weight_kg: float, distance_km: float, method: str) -> dict:
-    """A simple algorithmic calculation for carbon footprint, no AI needed."""
-    factors = {"air": 0.500, "sea": 0.015, "rail": 0.030}
-    factor = factors.get(method.lower(), 0.500) 
+    factors = {"air": 1.500, "sea": 0.015, "rail": 0.030} # Adjusted air factor for realistic long-haul cargo
+    factor = factors.get(method.lower(), 1.500) 
     
     emissions = (weight_kg / 1000) * distance_km * factor
     
@@ -55,49 +48,57 @@ def calculate_carbon_footprint(weight_kg: float, distance_km: float, method: str
     saved = max(0, emissions - alt_emissions)
 
     return {
-        "current_method": method,
+        "current_method": method.capitalize() if method else "Unknown",
         "estimated_co2_kg": round(emissions, 2),
-        "greener_alternative": alt_method,
+        "greener_alternative": alt_method.capitalize(),
         "potential_savings_kg": round(saved, 2)
     }
 
 @app.post("/analyze-document")
 async def analyze_document(file: UploadFile = File(...)):
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported for this MVP.")
+    allowed_extensions = ('.pdf', '.png', '.jpg', '.jpeg')
+    if not file.filename.lower().endswith(allowed_extensions):
+        raise HTTPException(status_code=400, detail="Please upload a PDF or an Image (PNG/JPG).")
+
+    temp_file_path = None
+    uploaded_gemini_file = None
 
     try:
-        # 1. Read and Extract Text from PDF
-        contents = await file.read()
-        doc = fitz.open(stream=contents, filetype="pdf")
-        text_content = ""
-        for page in doc:
-            text_content += page.get_text()
-        doc.close()
+        suffix = os.path.splitext(file.filename)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_file.write(await file.read())
+            temp_file_path = temp_file.name
 
-        # 2. Call Gemini using the NEW SDK and Pydantic Schema
-        prompt = f"""
-        You are an elite customs compliance AI for DP World. Analyze the following trade document text.
-        Extract the shipment details and cross-reference them against these strict rules:
-        
-        RULES:
-        1. Every document MUST have a 6-digit HS Code. If missing, severity is HIGH.
-        2. The HS code MUST logically match the product description. If it mismatches (e.g., code for spices applied to electronics), severity is HIGH and flag as RED risk.
-        3. Weight and Destination Country are mandatory. If missing, severity is MEDIUM.
-        4. If shipping from India to UAE, a Certificate of Origin is implicitly required. Note this as a LOW severity reminder.
+        uploaded_gemini_file = client.files.upload(file=temp_file_path)
 
-        Based on these rules, assess the document. 
-        If there are HIGH severity issues, Risk Score is 'Red'. 
-        If only MEDIUM/LOW, Risk Score is 'Yellow'. 
-        If perfectly compliant, Risk Score is 'Green'.
+        # The Elite Customs Officer Prompt
+        prompt = """
+        You are an elite customs compliance AI system for DP World. 
+        Your task is to visually analyze the attached commercial document and detect ALL possible errors, inconsistencies, and compliance risks.
+        You must behave exactly like a real customs officer and logistics compliance expert.
 
-        Document Text:
-        {text_content}
+        STEP 1: VALIDATION RULES
+        Check ALL of the following:
+        1. HS CODE VALIDATION: Must be present for every item (6-8 digits). Must logically match the product description. 
+        2. PRODUCT DESCRIPTION: Must be specific. Flag vague terms.
+        3. MISSING FIELDS: Detect missing overall weights, origins, or values.
+        4. DATA CONSISTENCY: The mathematical sum of item totals MUST equal the invoice subtotal/total. Verify weight consistency.
+        5. TRADE COMPLIANCE: Dynamically apply customs rules for major trade corridors (including India to UAE, US, EU, UK, and Singapore). Check if the declared value triggers any additional permit requirements, if the product category has restrictions for the destination, and if any mandatory filings (like Certificates of Origin) are missing.
+        6. RISK ANALYSIS: Detect suspicious pricing, mismatches, or missing totals.
+
+        STEP 2: SCORING
+        Determine STATUS:
+        - 'Green' -> No issues
+        - 'Yellow' -> Minor / moderate issues (like missing Certificate of Origin)
+        - 'Red' -> Critical issues (like mathematical total mismatches, severe HS code mismatches)
+
+        STEP 3: EXTRACTION
+        Extract the primary HS Code, Destination, Total Weight (calculate manually if unit weights exist but total is missing, otherwise return 0), and infer Shipment Method (e.g., DHL implies Air).
         """
         
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=prompt,
+            contents=[uploaded_gemini_file, prompt],
             config=genai.types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=AnalysisResult,
@@ -106,15 +107,24 @@ async def analyze_document(file: UploadFile = File(...)):
         
         analysis = json.loads(response.text)
 
-        # 3. Calculate Carbon Footprint (Default to 1000kg and 3000km if missing)
-        weight = analysis["extracted_data"].get("weight_kg") or 1000
+        # Carbon Math Integration
+        weight = analysis["extracted_data"].get("weight_kg") or 0
         method = analysis["extracted_data"].get("shipping_method") or "air"
-        carbon_data = calculate_carbon_footprint(weight, 3000, method)
-
-        analysis["carbon_footprint"] = carbon_data
+        
+        # Default distance 3000km for Chennai to Dubai demo
+        analysis["carbon_footprint"] = calculate_carbon_footprint(weight, 3000, method)
 
         return analysis
 
     except Exception as e:
         print(f"Error during analysis: {e}")
-        raise HTTPException(status_code=500, detail="AI processing failed. Please try again.")
+        raise HTTPException(status_code=500, detail="AI Vision processing failed. Please try again.")
+    
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        if uploaded_gemini_file:
+            try:
+                client.files.delete(name=uploaded_gemini_file.name)
+            except Exception:
+                pass
