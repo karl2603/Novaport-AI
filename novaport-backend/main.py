@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Body
+from fastapi import FastAPI, File, UploadFile, HTTPException, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
@@ -6,7 +6,9 @@ import tempfile
 from google import genai
 from pydantic import BaseModel
 from typing import Optional, List
+from dotenv import load_dotenv
 
+load_dotenv()
 app = FastAPI()
 
 app.add_middleware(
@@ -18,7 +20,7 @@ app.add_middleware(
 )
 
 # --- WARNING: PASTE YOUR ACTUAL API KEY HERE ---
-client = genai.Client(api_key="AIzaSyCy6E_Qo5U1b0Fze6Nv96Auvw41vHsmSPg")
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ==========================================
 # SCHEMAS FOR PAGE 1: EXTRACTION
@@ -46,6 +48,9 @@ class ExtractionResponse(BaseModel):
     total_value_usd: float
     line_items: List[LineItem]
     missing_fields: List[str]
+    currency: Optional[str] = "USD"
+    payment_terms: Optional[str] = "N/A"
+    purchase_order_number: Optional[str] = "N/A"
 
 # ==========================================
 # SCHEMAS FOR PAGE 3: HS CODE GENERATOR (TEXT)
@@ -68,6 +73,8 @@ class HSCodeGeneratorResponse(BaseModel):
     special_notes: str
     duty_rate: str
     required_certificates: List[str]
+class ChatRequest(BaseModel):
+    message: str
 
 # ==========================================
 # SCHEMAS FOR PAGE 2: COMPLIANCE CHECKER
@@ -85,26 +92,81 @@ class ExtractedComplianceData(BaseModel):
     shipment_method: str
 
 class ComplianceResponse(BaseModel):
-    status: str 
+    status: str
+    customs_hold_probability: str 
+    estimated_loss: str           
+    headline_action: str           
     compliance_report: List[ComplianceIssue]
     extracted_data: ExtractedComplianceData
 
-# Helper function for Carbon Math
-def calculate_carbon_footprint(weight_kg: float, method: str) -> dict:
-    distance_km = 3000
-    factors = {"air": 1.500, "sea": 0.015, "rail": 0.030}
-    factor = factors.get(method.lower() if method else "air", 1.500) 
-    emissions = (weight_kg / 1000) * distance_km * factor
-    alt_method = "sea" if (method and method.lower() == "air") else "rail"
-    alt_emissions = (weight_kg / 1000) * distance_km * factors.get(alt_method, 0.015)
+# ==========================================
+# HELPER: CARBON FOOTPRINT MATH
+# ==========================================
+def calculate_carbon_footprint(weight_kg: float, origin: str, destination: str, shipping_method: str):
+    """Calculates CO2 emissions based on GLEC Framework standards."""
     
+    # 1. GLEC Emission Factors (kg CO2e per ton-km)
+    method = str(shipping_method).lower()
+    if any(word in method for word in ["air", "flight", "dhl", "fedex", "express"]):
+        factor = 0.500
+        mode_name = "Air Freight"
+    elif any(word in method for word in ["sea", "ocean", "ship", "vessel", "fcl", "lcl"]):
+        factor = 0.015
+        mode_name = "Ocean Freight"
+    elif any(word in method for word in ["rail", "train"]):
+        factor = 0.030
+        mode_name = "Rail Freight"
+    else:
+        factor = 0.060  # Default to Road
+        mode_name = "Road Freight"
+
+    # 2. Hackathon-Accurate Regional Distance Matrix (in km)
+    origin_lower = str(origin).lower()
+    dest_lower = str(destination).lower()
+    
+    # Default fallback distance if countries aren't in the matrix
+    distance_km = 5000 
+    
+    if "india" in origin_lower:
+        if "uae" in dest_lower or "dubai" in dest_lower:
+            distance_km = 2200 
+        elif "usa" in dest_lower or "america" in dest_lower:
+            distance_km = 13500
+        elif "uk" in dest_lower or "europe" in dest_lower:
+            distance_km = 7200
+        elif "singapore" in dest_lower:
+            distance_km = 3000
+    elif "china" in origin_lower:
+        if "usa" in dest_lower: distance_km = 11600
+        elif "europe" in dest_lower: distance_km = 8000
+        elif "uae" in dest_lower: distance_km = 6000
+
+    # 3. Calculate Total Emissions
+    weight_tons = float(weight_kg) / 1000.0 if weight_kg else 1.0 
+    co2_kg = weight_tons * distance_km * factor
+
+    # 4. Generate the "Wow Factor" equivalencies
+    trees_needed = max(1, int(co2_kg / 21)) 
+    smartphones = int(co2_kg / 0.0082) 
+
+    # 5. Calculate Optimization Savings (If Air, show Ocean savings)
+    potential_savings = 0
+    if mode_name == "Air Freight":
+        ocean_co2 = weight_tons * distance_km * 0.015
+        potential_savings = co2_kg - ocean_co2
+
     return {
-        "current_method": method.capitalize() if method else "Air",
-        "estimated_co2_kg": round(emissions, 2),
-        "greener_alternative": alt_method.capitalize(),
-        "potential_savings_kg": round(max(0, emissions - alt_emissions), 2)
+        "co2_emissions_kg": round(co2_kg, 2),
+        "distance_km": distance_km,
+        "mode_used": mode_name,
+        "trees_equivalent": trees_needed,
+        "smartphones_equivalent": f"{smartphones:,}", 
+        "potential_savings_kg": round(potential_savings, 2)
     }
 
+# ==========================================
+# HELPER: GEMINI VISION PROCESSOR
+# ==========================================
 async def process_with_gemini(file: UploadFile, prompt: str, schema):
     allowed_extensions = ('.pdf', '.png', '.jpg', '.jpeg')
     if not file.filename.lower().endswith(allowed_extensions):
@@ -127,6 +189,7 @@ async def process_with_gemini(file: UploadFile, prompt: str, schema):
             config=genai.types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=schema,
+                temperature=0.1
             ),
         )
         return json.loads(response.text)
@@ -142,15 +205,47 @@ async def process_with_gemini(file: UploadFile, prompt: str, schema):
             except Exception:
                 pass
 
+
 # ==========================================
 # API ENDPOINTS
 # ==========================================
 
 @app.post("/api/extract")
-async def extract_document(file: UploadFile = File(...)):
-    prompt = """You are an elite customs AI. Extract EVERY piece of information from this trade document perfectly.
-    Extract all line items separately. Missing fields go to missing_fields. Output strictly matching the schema."""
+async def extract_document(
+    file: UploadFile = File(...),
+    requested_fields: str = Form(default="ALL") 
+):
+    prompt = f"""You are an elite customs AI. Extract information from this trade document.
+    CRITICAL INSTRUCTION: The user ONLY wants to extract the following specific sections: {requested_fields}.
+    If a field is NOT in that list, ignore it and return "N/A" for strings or 0 for numbers.
+    If 'Products' or 'Line Items' is requested, extract all line items perfectly.
+    Output strictly matching the JSON schema."""
+    
     return await process_with_gemini(file, prompt, ExtractionResponse)
+@app.post("/api/chat")
+async def trade_assistant_chat(request: ChatRequest):
+    try:
+        # The prompt forces Gemini to act as a DP World document expert
+        prompt = f"""
+        You are 'NovaPort', DP World's elite trade compliance and logistics assistant.
+        The user is asking: "{request.message}"
+        
+        If they are asking about shipping goods between specific countries (e.g., India to UAE), 
+        provide a clear, bulleted checklist of the MANDATORY documents required for export and import.
+        Always include standard documents (Commercial Invoice, Packing List, Bill of Lading/Airway Bill, Certificate of Origin) 
+        AND any specific certificates required for that specific route (e.g., Phytosanitary, Halal certs for UAE, FDA for USA).
+        Keep your response concise, professional, and easy to read.
+        """
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        return {"reply": response.text}
+    except Exception as e:
+        print(f"Chatbot Error: {e}")
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail="Chat processing failed.")
 
 @app.post("/api/hscode")
 async def generate_hscode(request: HSCodeRequest):
@@ -187,16 +282,39 @@ async def generate_hscode(request: HSCodeRequest):
         print(f"Gemini Error: {e}")
         raise HTTPException(status_code=500, detail="AI Text processing failed.")
 
+
 @app.post("/api/compliance")
 async def check_compliance(file: UploadFile = File(...)):
     prompt = """
-    You are a customs compliance AI system. Analyze this commercial invoice and detect ALL errors and compliance risks.
-    Determine STATUS: GREEN, YELLOW, or RED based on strict trade regulations.
+    You are an elite, highly rigorous international customs auditor. 
+    Perform an EXHAUSTIVE, line-by-line scan of the entire attached commercial invoice.
+    Look for missing tax IDs, math errors, missing HS codes, vague descriptions, and missing origin/destination info.
+
+    You MUST output JSON that strictly follows this structure:
+    - status: "RED" (if critical errors), "YELLOW" (if warnings), or "GREEN" (if perfect).
+    - customs_hold_probability: e.g., "85%", "40%", or "5%". (Must include the % sign).
+    - estimated_loss: e.g., "₹2-5 Lakh", "₹50,000", or "₹0".
+    - headline_action: e.g., "Fix before dispatch", "Review warnings", or "Clear to ship".
+    - compliance_report: A list of every single error found (type, severity, description, fix).
+    - extracted_data: Extract the basic hs_code, destination, total_weight (as float), and shipment_method.
     """
+    
+    # Send to your working helper function
     result = await process_with_gemini(file, prompt, ComplianceResponse)
-    carbon_data = calculate_carbon_footprint(
-        result.get("extracted_data", {}).get("total_weight", 0), 
-        result.get("extracted_data", {}).get("shipment_method", "air")
-    )
-    result["carbon_footprint"] = carbon_data
+    
+    # Calculate ESG / Carbon Footprint with the newly extracted data
+    try:
+        extracted = result.get("extracted_data", {})
+        weight = extracted.get("total_weight", 500.0)
+        dest = extracted.get("destination", "UAE")
+        method = extracted.get("shipment_method", "air")
+        
+        # Calculate carbon based on the math helper (Origin defaults to India for your hackathon)
+        carbon_data = calculate_carbon_footprint(weight, "India", dest, method)
+        
+        # Inject the carbon data into the response payload so React can see it
+        result["carbon_footprint"] = carbon_data
+    except Exception as e:
+        print(f"Carbon calculation skipped: {e}")
+        
     return result
