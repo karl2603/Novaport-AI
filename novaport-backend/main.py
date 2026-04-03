@@ -19,12 +19,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- WARNING: PASTE YOUR ACTUAL API KEY HERE ---
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# ==========================================
-# SCHEMAS FOR PAGE 1: EXTRACTION
-# ==========================================
 class LineItem(BaseModel):
     product_description: str
     hs_code: str
@@ -52,11 +48,9 @@ class ExtractionResponse(BaseModel):
     payment_terms: Optional[str] = "N/A"
     purchase_order_number: Optional[str] = "N/A"
 
-# ==========================================
-# SCHEMAS FOR PAGE 3: HS CODE GENERATOR (TEXT)
-# ==========================================
 class HSCodeRequest(BaseModel):
     description: str
+    language: str = "English"
 
 class AlternativeHSCode(BaseModel):
     code: str
@@ -66,19 +60,18 @@ class AlternativeHSCode(BaseModel):
 class HSCodeGeneratorResponse(BaseModel):
     primary_hs_code: str
     confidence_percentage: int
-    confidence_label: str # "Very High", "High", "Medium", "Low"
+    confidence_label: str 
     explanation: str
     official_description: str
-    alternatives: List[AlternativeHSCode] # Must be exactly 3
+    alternatives: List[AlternativeHSCode] 
     special_notes: str
     duty_rate: str
     required_certificates: List[str]
+
 class ChatRequest(BaseModel):
     message: str
+    language: str = "English"
 
-# ==========================================
-# SCHEMAS FOR PAGE 2: COMPLIANCE CHECKER
-# ==========================================
 class ComplianceIssue(BaseModel):
     type: str
     severity: str 
@@ -99,13 +92,7 @@ class ComplianceResponse(BaseModel):
     compliance_report: List[ComplianceIssue]
     extracted_data: ExtractedComplianceData
 
-# ==========================================
-# HELPER: CARBON FOOTPRINT MATH
-# ==========================================
 def calculate_carbon_footprint(weight_kg: float, origin: str, destination: str, shipping_method: str):
-    """Calculates CO2 emissions based on GLEC Framework standards."""
-    
-    # 1. GLEC Emission Factors (kg CO2e per ton-km)
     method = str(shipping_method).lower()
     if any(word in method for word in ["air", "flight", "dhl", "fedex", "express"]):
         factor = 0.500
@@ -117,39 +104,30 @@ def calculate_carbon_footprint(weight_kg: float, origin: str, destination: str, 
         factor = 0.030
         mode_name = "Rail Freight"
     else:
-        factor = 0.060  # Default to Road
+        factor = 0.060
         mode_name = "Road Freight"
 
-    # 2. Hackathon-Accurate Regional Distance Matrix (in km)
     origin_lower = str(origin).lower()
     dest_lower = str(destination).lower()
     
-    # Default fallback distance if countries aren't in the matrix
     distance_km = 5000 
     
     if "india" in origin_lower:
-        if "uae" in dest_lower or "dubai" in dest_lower:
-            distance_km = 2200 
-        elif "usa" in dest_lower or "america" in dest_lower:
-            distance_km = 13500
-        elif "uk" in dest_lower or "europe" in dest_lower:
-            distance_km = 7200
-        elif "singapore" in dest_lower:
-            distance_km = 3000
+        if "uae" in dest_lower or "dubai" in dest_lower: distance_km = 2200 
+        elif "usa" in dest_lower or "america" in dest_lower: distance_km = 13500
+        elif "uk" in dest_lower or "europe" in dest_lower: distance_km = 7200
+        elif "singapore" in dest_lower: distance_km = 3000
     elif "china" in origin_lower:
         if "usa" in dest_lower: distance_km = 11600
         elif "europe" in dest_lower: distance_km = 8000
         elif "uae" in dest_lower: distance_km = 6000
 
-    # 3. Calculate Total Emissions
     weight_tons = float(weight_kg) / 1000.0 if weight_kg else 1.0 
     co2_kg = weight_tons * distance_km * factor
 
-    # 4. Generate the "Wow Factor" equivalencies
     trees_needed = max(1, int(co2_kg / 21)) 
     smartphones = int(co2_kg / 0.0082) 
 
-    # 5. Calculate Optimization Savings (If Air, show Ocean savings)
     potential_savings = 0
     if mode_name == "Air Freight":
         ocean_co2 = weight_tons * distance_km * 0.015
@@ -164,9 +142,6 @@ def calculate_carbon_footprint(weight_kg: float, origin: str, destination: str, 
         "potential_savings_kg": round(potential_savings, 2)
     }
 
-# ==========================================
-# HELPER: GEMINI VISION PROCESSOR
-# ==========================================
 async def process_with_gemini(file: UploadFile, prompt: str, schema):
     allowed_extensions = ('.pdf', '.png', '.jpg', '.jpeg')
     if not file.filename.lower().endswith(allowed_extensions):
@@ -205,36 +180,35 @@ async def process_with_gemini(file: UploadFile, prompt: str, schema):
             except Exception:
                 pass
 
-
-# ==========================================
-# API ENDPOINTS
-# ==========================================
-
 @app.post("/api/extract")
 async def extract_document(
     file: UploadFile = File(...),
-    requested_fields: str = Form(default="ALL") 
+    requested_fields: str = Form(default="ALL"),
+    language: str = Form(default="English")
 ):
     prompt = f"""You are an elite customs AI. Extract information from this trade document.
     CRITICAL INSTRUCTION: The user ONLY wants to extract the following specific sections: {requested_fields}.
     If a field is NOT in that list, ignore it and return "N/A" for strings or 0 for numbers.
     If 'Products' or 'Line Items' is requested, extract all line items perfectly.
+    
+    LANGUAGE INSTRUCTION: Keep all JSON keys exactly in English, but translate all extracted string values, product descriptions, and output text into {language}.
     Output strictly matching the JSON schema."""
     
     return await process_with_gemini(file, prompt, ExtractionResponse)
+
 @app.post("/api/chat")
 async def trade_assistant_chat(request: ChatRequest):
     try:
-        # The prompt forces Gemini to act as a DP World document expert
         prompt = f"""
         You are 'NovaPort', DP World's elite trade compliance and logistics assistant.
         The user is asking: "{request.message}"
         
-        If they are asking about shipping goods between specific countries (e.g., India to UAE), 
+        If they are asking about shipping goods between specific countries, 
         provide a clear, bulleted checklist of the MANDATORY documents required for export and import.
-        Always include standard documents (Commercial Invoice, Packing List, Bill of Lading/Airway Bill, Certificate of Origin) 
-        AND any specific certificates required for that specific route (e.g., Phytosanitary, Halal certs for UAE, FDA for USA).
+        Always include standard documents AND any specific certificates required for that specific route.
         Keep your response concise, professional, and easy to read.
+        
+        CRITICAL: You must write your entire response fluently in {request.language}.
         """
         
         response = client.models.generate_content(
@@ -267,7 +241,7 @@ async def generate_hscode(request: HSCodeRequest):
         6. For duty_rate, provide standard Indian export duty or "Refer to Customs Tariff".
         7. For required_certificates, list typical Indian export certs (e.g., APEDA, BIS, Phytosanitary).
 
-        Return the data strictly matching the requested JSON schema.
+        LANGUAGE INSTRUCTION: Keep all JSON schema keys exactly as requested in English. However, translate ALL text values (explanation, official_description, alternatives description, special_notes, required_certificates, confidence_label) into {request.language}.
         """
         response = client.models.generate_content(
             model='gemini-2.5-flash',
@@ -282,10 +256,12 @@ async def generate_hscode(request: HSCodeRequest):
         print(f"Gemini Error: {e}")
         raise HTTPException(status_code=500, detail="AI Text processing failed.")
 
-
 @app.post("/api/compliance")
-async def check_compliance(file: UploadFile = File(...)):
-    prompt = """
+async def check_compliance(
+    file: UploadFile = File(...),
+    language: str = Form(default="English")
+):
+    prompt = f"""
     You are an elite, highly rigorous international customs auditor. 
     Perform an EXHAUSTIVE, line-by-line scan of the entire attached commercial invoice.
     Look for missing tax IDs, math errors, missing HS codes, vague descriptions, and missing origin/destination info.
@@ -297,22 +273,19 @@ async def check_compliance(file: UploadFile = File(...)):
     - headline_action: e.g., "Fix before dispatch", "Review warnings", or "Clear to ship".
     - compliance_report: A list of every single error found (type, severity, description, fix).
     - extracted_data: Extract the basic hs_code, destination, total_weight (as float), and shipment_method.
+    
+    LANGUAGE INSTRUCTION: Keep all JSON keys exactly in English. Translate all string VALUES (especially headline_action, descriptions, fixes, and extracted text) into {language}. Keep the status exact strings as RED, YELLOW, or GREEN.
     """
     
-    # Send to your working helper function
     result = await process_with_gemini(file, prompt, ComplianceResponse)
     
-    # Calculate ESG / Carbon Footprint with the newly extracted data
     try:
         extracted = result.get("extracted_data", {})
         weight = extracted.get("total_weight", 500.0)
         dest = extracted.get("destination", "UAE")
         method = extracted.get("shipment_method", "air")
         
-        # Calculate carbon based on the math helper (Origin defaults to India for your hackathon)
         carbon_data = calculate_carbon_footprint(weight, "India", dest, method)
-        
-        # Inject the carbon data into the response payload so React can see it
         result["carbon_footprint"] = carbon_data
     except Exception as e:
         print(f"Carbon calculation skipped: {e}")
