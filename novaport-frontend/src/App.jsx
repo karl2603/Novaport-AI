@@ -479,7 +479,7 @@ function App() {
     if (endpoint === 'extract') formData.append('requested_fields', selectedFields.join(', '));
 
     try {
-      const response = await axios.post(`http://novaport-ai.onrender.com/api/${endpoint}`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const response = await axios.post(`https://novaport-ai-backend.onrender.com/api/${endpoint}`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
       setResults(response.data);
     } catch (err) { setError('Connection anomaly. Unable to reach Novaport Core.'); } finally { setLoading(false); }
   };
@@ -488,7 +488,7 @@ function App() {
     e.preventDefault(); if (!hsInputText.trim()) return;
     setLoading(true); setError('');
     try {
-      const response = await axios.post(`http://novaport-ai.onrender.com/api/hscode`, { 
+      const response = await axios.post(`https://novaport-ai-backend.onrender.com/api/hscode`, { 
         description: hsInputText,
         language: languages[lang].apiName
       });
