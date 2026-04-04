@@ -255,7 +255,6 @@ async def generate_hscode(request: HSCodeRequest):
     except Exception as e:
         print(f"Gemini Error: {e}")
         raise HTTPException(status_code=500, detail="AI Text processing failed.")
-
 @app.post("/api/compliance")
 async def check_compliance(
     file: UploadFile = File(...),
@@ -267,18 +266,22 @@ async def check_compliance(
     STEP 1: Identify the exact type of trade document attached.
     
     STEP 2: Perform a compliance scan based ONLY on critical international trade requirements.
-    CRITICAL INSTRUCTION: DO NOT hallucinate errors. ONLY flag actual missing critical data (missing HS codes, tax IDs, math mismatches, Incoterms, etc.).
-
-    STEP 3: Calculate the exact `document_accuracy_rate` using this STRICT MATH:
-    Start at 100%, then deduct:
-    - 25% per CRITICAL/HIGH error.
-    - 10% per MEDIUM error.
-    - 5% per MINOR error.
-
-    STEP 4: Determine status based on Accuracy:
-    - GREEN: 100% (ZERO errors). estimated_loss MUST be "₹0".
-    - YELLOW: 75%-95% (1-3 minor/medium errors).
-    - RED: 74% or lower (Critical errors).
+    
+    CRITICAL ESCAPE HATCH: If the document contains all standard required fields (Shipper, Consignee, Date, Items, Values) and has no obvious math errors, it is PERFECT. You MUST return an empty list `[]` for the `compliance_report`. Do NOT nitpick or invent missing niche certificates just to populate the report.
+    
+    STEP 3: Determine status based on the errors found:
+    - PERFECT DOCUMENT (0 errors): 
+        status MUST be "GREEN"
+        estimated_loss MUST be "₹0"
+        customs_hold_probability MUST be "< 5%"
+        headline_action MUST be "APPROVED — CLEAR TO SHIP"
+        compliance_report MUST be []
+    
+    - MINOR/MEDIUM ISSUES (1-2 errors): 
+        status MUST be "YELLOW"
+        
+    - CRITICAL ISSUES (3+ errors or missing HS code/Total Value): 
+        status MUST be "RED"
     
     LANGUAGE INSTRUCTION: Keep all JSON keys exactly in English. Translate all string VALUES (especially headline_action, descriptions, fixes, and extracted text) into {language}. Keep the status exact strings as RED, YELLOW, or GREEN.
     """
