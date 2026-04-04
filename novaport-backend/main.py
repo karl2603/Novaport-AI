@@ -262,17 +262,23 @@ async def check_compliance(
     language: str = Form(default="English")
 ):
     prompt = f"""
-    You are an elite, highly rigorous international customs auditor. 
-    Perform an EXHAUSTIVE, line-by-line scan of the entire attached commercial invoice.
-    Look for missing tax IDs, math errors, missing HS codes, vague descriptions, and missing origin/destination info.
+    You are a highly practical international customs auditor. 
+    
+    STEP 1: Identify the exact type of trade document attached.
+    
+    STEP 2: Perform a compliance scan based ONLY on critical international trade requirements.
+    CRITICAL INSTRUCTION: DO NOT hallucinate errors. ONLY flag actual missing critical data (missing HS codes, tax IDs, math mismatches, Incoterms, etc.).
 
-    You MUST output JSON that strictly follows this structure:
-    - status: "RED" (if critical errors), "YELLOW" (if warnings), or "GREEN" (if perfect).
-    - customs_hold_probability: e.g., "85%", "40%", or "5%". (Must include the % sign).
-    - estimated_loss: e.g., "₹2-5 Lakh", "₹50,000", or "₹0".
-    - headline_action: e.g., "Fix before dispatch", "Review warnings", or "Clear to ship".
-    - compliance_report: A list of every single error found (type, severity, description, fix).
-    - extracted_data: Extract the basic hs_code, destination, total_weight (as float), and shipment_method.
+    STEP 3: Calculate the exact `document_accuracy_rate` using this STRICT MATH:
+    Start at 100%, then deduct:
+    - 25% per CRITICAL/HIGH error.
+    - 10% per MEDIUM error.
+    - 5% per MINOR error.
+
+    STEP 4: Determine status based on Accuracy:
+    - GREEN: 100% (ZERO errors). estimated_loss MUST be "₹0".
+    - YELLOW: 75%-95% (1-3 minor/medium errors).
+    - RED: 74% or lower (Critical errors).
     
     LANGUAGE INSTRUCTION: Keep all JSON keys exactly in English. Translate all string VALUES (especially headline_action, descriptions, fixes, and extracted text) into {language}. Keep the status exact strings as RED, YELLOW, or GREEN.
     """
