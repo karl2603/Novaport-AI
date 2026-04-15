@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Activity, CheckCircle, ShieldAlert, AlertTriangle, Leaf, Zap, Globe, FileText } from 'lucide-react';
+import { Activity, CheckCircle, ShieldAlert, AlertTriangle, Leaf, Zap, Globe, FileText, Sparkles } from 'lucide-react';
 import { pageVariants, fadeUp, scaleUp, stagger, fluidSpring, PrimaryButton, UploadBox } from '../App';
 
 export default function CompliancePage({ activeDict, changePage, file, setFile, loading, onUpload, results, lang }) {

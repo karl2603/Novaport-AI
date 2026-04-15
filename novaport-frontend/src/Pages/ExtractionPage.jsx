@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Download, ListPlus, FileText, Hash, Calendar, AlertCircle, Globe, ArrowRight, MapPin, Package, DollarSign } from 'lucide-react';
+import { Download, ListPlus, FileText, Hash, Calendar, AlertCircle, Globe, ArrowRight, MapPin, Package, DollarSign, Boxes } from 'lucide-react';
 import { pageVariants, fadeUp, scaleUp, stagger, fluidSpring, PrimaryButton, SecondaryButton, UploadBox } from '../App';
 
 export default function ExtractionPage({ activeDict, changePage, file, setFile, loading, onUpload, results, selectedFields, setSelectedFields, handleDownload }) {
